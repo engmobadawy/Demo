@@ -1,7 +1,5 @@
 import Foundation
 
-/// Sends `Endpoint`s: builds the request, attaches the token, refreshes once on 401,
-/// retries transient failures, and decodes the response.
 public struct APIClient: Sendable {
     public typealias Sleep = @Sendable (TimeInterval) async throws -> Void
 
@@ -14,9 +12,6 @@ public struct APIClient: Sendable {
     private let decoder: JSONDecoder
     private let sleep: Sleep
 
-    /// - Parameters:
-    ///   - auth: Required for endpoints with `requiresAuth`. Pass `nil` for a public-only client.
-    ///   - sleep: Waits between retries. Inject a no-op in tests.
     public init(
         baseURL: URL,
         auth: AuthManager? = nil,
@@ -49,7 +44,6 @@ public struct APIClient: Sendable {
         }
     }
 
-    /// Raw response body, after auth and retries.
     public func data<Response>(for endpoint: Endpoint<Response>) async throws -> Data {
         let baseRequest = try makeRequest(for: endpoint)
         let policy = endpoint.retryPolicy ?? retryPolicy
@@ -86,7 +80,6 @@ public struct APIClient: Sendable {
                 return data
             }
 
-            // Refresh once per request; the retry after a refresh doesn't use the retry budget.
             if response.statusCode == 401, let auth, let sentToken {
                 guard !didRefresh else { throw NetworkError.unauthorized }
                 didRefresh = true
