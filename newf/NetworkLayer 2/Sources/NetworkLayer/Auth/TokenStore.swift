@@ -1,0 +1,95 @@
+import Foundation
+import os
+import Security
+
+/// Persists tokens between launches.
+///
+/// Synchronous on purpose: `AuthManager` reads it only at init and writes on change,
+/// so it never suspends between checking and using its session state.
+public protocol TokenStore: Sendable {
+    func load() -> AuthTokens?
+    func save(_ tokens: AuthTokens) throws
+    func clear() throws
+}
+
+/// Stores tokens as one Keychain item, readable after first unlock, never synced off-device.
+public struct KeychainTokenStore: TokenStore {
+    private let service: String
+    private let account: String
+
+    public init(service: String = Bundle.main.bundleIdentifier ?? "NetworkLayer", account: String = "auth-tokens") {
+        self.service = service
+        self.account = account
+    }
+
+    public func load() -> AuthTokens? {
+        var query = baseQuery
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+
+        var result: AnyObject?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+              let data = result as? Data
+        else { return nil }
+        return try? JSONDecoder().decode(AuthTokens.self, from: data)
+    }
+
+    public func save(_ tokens: AuthTokens) throws {
+        let attributes: [String: Any] = [
+            kSecValueData as String: try JSONEncoder().encode(tokens),
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+        ]
+
+        let updateStatus = SecItemUpdate(baseQuery as CFDictionary, attributes as CFDictionary)
+        switch updateStatus {
+        case errSecSuccess:
+            return
+        case errSecItemNotFound:
+            let item = baseQuery.merging(attributes) { _, new in new }
+            let addStatus = SecItemAdd(item as CFDictionary, nil)
+            guard addStatus == errSecSuccess else { throw KeychainError(status: addStatus) }
+        default:
+            throw KeychainError(status: updateStatus)
+        }
+    }
+
+    public func clear() throws {
+        let status = SecItemDelete(baseQuery as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw KeychainError(status: status)
+        }
+    }
+
+    private var baseQuery: [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+        ]
+    }
+}
+
+public struct KeychainError: Error, Sendable, Equatable {
+    public let status: OSStatus
+}
+
+/// Keeps tokens in memory only. For tests, previews, and guest sessions.
+public final class InMemoryTokenStore: TokenStore {
+    private let tokens: OSAllocatedUnfairLock<AuthTokens?>
+
+    public init(tokens: AuthTokens? = nil) {
+        self.tokens = OSAllocatedUnfairLock(initialState: tokens)
+    }
+
+    public func load() -> AuthTokens? {
+        tokens.withLock { $0 }
+    }
+
+    public func save(_ newTokens: AuthTokens) {
+        tokens.withLock { $0 = newTokens }
+    }
+
+    public func clear() {
+        tokens.withLock { $0 = nil }
+    }
+}
